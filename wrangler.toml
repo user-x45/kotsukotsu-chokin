@@ -3,7 +3,7 @@ main = "src/index.js"
 compatibility_date = "2025-01-01"
 
 [vars]
-GOOGLE_CLIENT_ID = "http://51271346959-al6a6sprfiji96230nk3ehtm6f02bnhn.apps.googleusercontent.com"
+GOOGLE_CLIENT_ID = "51271346959-al6a6sprfiji96230nk3ehtm6f02bnhn.apps.googleusercontent.com"
 ALLOWED_ORIGIN = "https://user-x45.github.io"
 
 [[d1_databases]]
