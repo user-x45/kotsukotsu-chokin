@@ -106,6 +106,32 @@ export default {
       return reply(env, { ...next, role: auth.role, savedToday: true });
     }
 
+    if (path === "/api/records" && request.method === "POST") {
+      if (auth.role !== "admin") return reply(env, { error: "forbidden" }, 403);
+
+      let input = {};
+      try { input = await request.json(); } catch (e) {}
+      const value = String(input.savedAt || "");
+      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) {
+        return reply(env, { error: "invalid_datetime" }, 400);
+      }
+      const when = new Date(value + ":00+09:00");
+      if (Number.isNaN(when.getTime())) return reply(env, { error: "invalid_datetime" }, 400);
+
+      const data = await summary(env);
+      if (data.count >= MAX_COUNT) return reply(env, { error: "goal_reached" }, 400);
+
+      try {
+        await env.DB
+          .prepare("INSERT INTO savings (day, saved_at, saved_by) VALUES (?, ?, ?)")
+          .bind(value.slice(0, 10), when.toISOString(), auth.email)
+          .run();
+      } catch (e) {
+        return reply(env, { error: "already_saved" }, 409);
+      }
+      return reply(env, { ok: true });
+    }
+
     const match = path.match(/^\/api\/records\/(\d+)$/);
     if (match && request.method === "DELETE") {
       if (auth.role !== "admin") return reply(env, { error: "forbidden" }, 403);
