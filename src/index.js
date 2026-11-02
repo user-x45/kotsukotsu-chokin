@@ -23,6 +23,13 @@ function reply(env, body, status = 200) {
   });
 }
 
+function parseJst(value) {
+  if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) return null;
+  const date = new Date(value + ":00+09:00");
+  if (Number.isNaN(date.getTime())) return null;
+  return { date, day: value.slice(0, 10) };
+}
+
 function todayJst() {
   return new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
@@ -82,6 +89,15 @@ export default {
           .prepare("SELECT id, day, saved_at, saved_by FROM savings ORDER BY saved_at DESC")
           .all();
         body.records = results;
+        const pending = await env.DB
+          .prepare("SELECT id, day, target_at, requested_by FROM requests WHERE status = 'pending' ORDER BY target_at ASC")
+          .all();
+        body.pending = pending.results;
+      } else {
+        const mine = await env.DB
+          .prepare("SELECT id, day, target_at, status FROM requests ORDER BY id DESC LIMIT 10")
+          .all();
+        body.requests = mine.results;
       }
       return reply(env, body);
     }
@@ -112,11 +128,10 @@ export default {
       let input = {};
       try { input = await request.json(); } catch (e) {}
       const value = String(input.savedAt || "");
-      if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(value)) {
-        return reply(env, { error: "invalid_datetime" }, 400);
-      }
-      const when = new Date(value + ":00+09:00");
-      if (Number.isNaN(when.getTime())) return reply(env, { error: "invalid_datetime" }, 400);
+      const parsed = parseJst(value);
+      if (!parsed) return reply(env, { error: "invalid_datetime" }, 400);
+      if (parsed.date.getTime() > Date.now()) return reply(env, { error: "future" }, 400);
+      const when = parsed.date;
 
       const data = await summary(env);
       if (data.count >= MAX_COUNT) return reply(env, { error: "goal_reached" }, 400);
@@ -126,6 +141,74 @@ export default {
           .prepare("INSERT INTO savings (day, saved_at, saved_by) VALUES (?, ?, ?)")
           .bind(value.slice(0, 10), when.toISOString(), auth.email)
           .run();
+      } catch (e) {
+        return reply(env, { error: "already_saved" }, 409);
+      }
+      return reply(env, { ok: true });
+    }
+
+    if (path === "/api/requests" && request.method === "POST") {
+      if (auth.role !== "user") return reply(env, { error: "forbidden" }, 403);
+
+      let input = {};
+      try { input = await request.json(); } catch (e) {}
+      const parsed = parseJst(String(input.savedAt || ""));
+      if (!parsed) return reply(env, { error: "invalid_datetime" }, 400);
+      if (parsed.date.getTime() > Date.now()) return reply(env, { error: "future" }, 400);
+      if (parsed.day === todayJst()) return reply(env, { error: "today" }, 400);
+
+      const data = await summary(env);
+      if (data.count >= MAX_COUNT) return reply(env, { error: "goal_reached" }, 400);
+
+      const saved = await env.DB.prepare("SELECT 1 FROM savings WHERE day = ?").bind(parsed.day).first();
+      if (saved) return reply(env, { error: "already_saved" }, 409);
+
+      const waiting = await env.DB
+        .prepare("SELECT 1 FROM requests WHERE day = ? AND status = 'pending'")
+        .bind(parsed.day)
+        .first();
+      if (waiting) return reply(env, { error: "already_requested" }, 409);
+
+      await env.DB
+        .prepare("INSERT INTO requests (day, target_at, requested_by, requested_at, status) VALUES (?, ?, ?, ?, 'pending')")
+        .bind(parsed.day, parsed.date.toISOString(), auth.email, new Date().toISOString())
+        .run();
+      return reply(env, { ok: true });
+    }
+
+    const decision = path.match(/^\/api\/requests\/(\d+)\/(approve|reject)$/);
+    if (decision && request.method === "POST") {
+      if (auth.role !== "admin") return reply(env, { error: "forbidden" }, 403);
+
+      const id = Number(decision[1]);
+      const row = await env.DB
+        .prepare("SELECT id, day, target_at, requested_by FROM requests WHERE id = ? AND status = 'pending'")
+        .bind(id)
+        .first();
+      if (!row) return reply(env, { error: "not_found" }, 404);
+
+      const now = new Date().toISOString();
+
+      if (decision[2] === "reject") {
+        await env.DB
+          .prepare("UPDATE requests SET status = 'rejected', decided_at = ? WHERE id = ?")
+          .bind(now, id)
+          .run();
+        return reply(env, { ok: true });
+      }
+
+      const data = await summary(env);
+      if (data.count >= MAX_COUNT) return reply(env, { error: "goal_reached" }, 400);
+
+      try {
+        await env.DB.batch([
+          env.DB
+            .prepare("INSERT INTO savings (day, saved_at, saved_by) VALUES (?, ?, ?)")
+            .bind(row.day, row.target_at, row.requested_by),
+          env.DB
+            .prepare("UPDATE requests SET status = 'approved', decided_at = ? WHERE id = ?")
+            .bind(now, id)
+        ]);
       } catch (e) {
         return reply(env, { error: "already_saved" }, 409);
       }
