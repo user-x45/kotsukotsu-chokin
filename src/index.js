@@ -84,11 +84,17 @@ export default {
       const done = await env.DB.prepare("SELECT 1 FROM savings WHERE day = ?").bind(today).first();
       const body = { ...data, email: auth.email, role: auth.role, savedToday: Boolean(done) };
 
+      const saved = await env.DB
+        .prepare("SELECT id, day, saved_at, saved_by FROM savings ORDER BY saved_at DESC")
+        .all();
+      body.records = saved.results.map((r) => ({
+        id: r.id,
+        day: r.day,
+        saved_at: r.saved_at,
+        by: ACCOUNTS[String(r.saved_by).toLowerCase()] || "user"
+      }));
+
       if (auth.role === "admin") {
-        const { results } = await env.DB
-          .prepare("SELECT id, day, saved_at, saved_by FROM savings ORDER BY saved_at DESC")
-          .all();
-        body.records = results;
         const pending = await env.DB
           .prepare("SELECT id, day, target_at, requested_by FROM requests WHERE status = 'pending' ORDER BY target_at ASC")
           .all();
