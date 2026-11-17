@@ -34,9 +34,64 @@ function todayJst() {
   return new Date(Date.now() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
-async function authenticate(request, env) {
+const SESSION_DAYS = 365;
+const encoder = new TextEncoder();
+
+function toB64Url(bytes) {
+  let bin = "";
+  for (const b of new Uint8Array(bytes)) bin += String.fromCharCode(b);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function fromB64Url(text) {
+  const pad = "=".repeat((4 - (text.length % 4)) % 4);
+  const bin = atob(text.replace(/-/g, "+").replace(/_/g, "/") + pad);
+  return Uint8Array.from(bin, (c) => c.charCodeAt(0));
+}
+
+async function hmacKey(env) {
+  return crypto.subtle.importKey(
+    "raw",
+    encoder.encode(env.SESSION_SECRET),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign", "verify"]
+  );
+}
+
+async function issueSession(email, env) {
+  const exp = Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000;
+  const payload = toB64Url(encoder.encode(JSON.stringify({ email, exp })));
+  const sig = await crypto.subtle.sign("HMAC", await hmacKey(env), encoder.encode(payload));
+  return payload + "." + toB64Url(sig);
+}
+
+async function verifySession(token, env) {
+  const parts = token.split(".");
+  if (parts.length !== 2) return null;
+  try {
+    const ok = await crypto.subtle.verify(
+      "HMAC",
+      await hmacKey(env),
+      fromB64Url(parts[1]),
+      encoder.encode(parts[0])
+    );
+    if (!ok) return null;
+    const data = JSON.parse(new TextDecoder().decode(fromB64Url(parts[0])));
+    if (!data.email || !(data.exp > Date.now())) return null;
+    return String(data.email).toLowerCase();
+  } catch (e) {
+    return null;
+  }
+}
+
+function bearer(request) {
   const header = request.headers.get("Authorization") || "";
-  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  return header.startsWith("Bearer ") ? header.slice(7) : "";
+}
+
+async function verifyGoogle(request, env) {
+  const token = bearer(request);
   if (!token) return { error: 401 };
 
   const res = await fetch("https://oauth2.googleapis.com/tokeninfo?id_token=" + encodeURIComponent(token));
@@ -47,6 +102,19 @@ async function authenticate(request, env) {
   if (String(info.email_verified) !== "true") return { error: 401 };
 
   const email = String(info.email || "").toLowerCase();
+  const role = ACCOUNTS[email];
+  if (!role) return { error: 403 };
+
+  return { email, role };
+}
+
+async function authenticate(request, env) {
+  const token = bearer(request);
+  if (!token) return { error: 401 };
+
+  const email = await verifySession(token, env);
+  if (!email) return { error: 401 };
+
   const role = ACCOUNTS[email];
   if (!role) return { error: 403 };
 
@@ -71,6 +139,15 @@ export default {
 
     if (!path.startsWith("/api/")) {
       return reply(env, { error: "not_found" }, 404);
+    }
+
+    if (path === "/api/login" && request.method === "POST") {
+      const result = await verifyGoogle(request, env);
+      if (result.error) {
+        return reply(env, { error: result.error === 403 ? "forbidden" : "unauthorized" }, result.error);
+      }
+      const session = await issueSession(result.email, env);
+      return reply(env, { token: session, email: result.email, role: result.role });
     }
 
     const auth = await authenticate(request, env);
