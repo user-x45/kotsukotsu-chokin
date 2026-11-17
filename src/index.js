@@ -92,19 +92,18 @@ function bearer(request) {
 
 async function verifyGoogle(request, env) {
   const token = bearer(request);
-  if (!token) return { error: 401, reason: "no_token" };
+  if (!token) return { error: 401 };
 
   const res = await fetch("https://oauth2.googleapis.com/tokeninfo?id_token=" + encodeURIComponent(token));
-  if (!res.ok) return { error: 401, reason: "tokeninfo_" + res.status };
+  if (!res.ok) return { error: 401 };
 
   const info = await res.json();
-  if (!env.GOOGLE_CLIENT_ID) return { error: 401, reason: "env_client_id_missing" };
-  if (info.aud !== env.GOOGLE_CLIENT_ID) return { error: 401, reason: "aud_mismatch" };
-  if (String(info.email_verified) !== "true") return { error: 401, reason: "email_not_verified" };
+  if (info.aud !== env.GOOGLE_CLIENT_ID) return { error: 401 };
+  if (String(info.email_verified) !== "true") return { error: 401 };
 
   const email = String(info.email || "").toLowerCase();
   const role = ACCOUNTS[email];
-  if (!role) return { error: 403, reason: "not_allowed" };
+  if (!role) return { error: 403 };
 
   return { email, role };
 }
@@ -142,14 +141,10 @@ export default {
       return reply(env, { error: "not_found" }, 404);
     }
 
-    if (!env.SESSION_SECRET) {
-      return reply(env, { error: "missing_session_secret" }, 500);
-    }
-
     if (path === "/api/login" && request.method === "POST") {
       const result = await verifyGoogle(request, env);
       if (result.error) {
-        return reply(env, { error: result.error === 403 ? "forbidden" : "unauthorized", reason: result.reason }, result.error);
+        return reply(env, { error: result.error === 403 ? "forbidden" : "unauthorized" }, result.error);
       }
       const session = await issueSession(result.email, env);
       return reply(env, { token: session, email: result.email, role: result.role });
